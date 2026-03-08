@@ -120,6 +120,23 @@ class StageSmoother:
         return top_stage if top_votes >= self.min_votes else "unknown"
 
 
+class ExerciseSmoother:
+    def __init__(self, window=15, min_votes=8):
+        self.buf = collections.deque(maxlen=window)
+        self.min_votes = min_votes
+
+    def reset(self):
+        self.buf.clear()
+
+    def update(self, exercise: str) -> str:
+        if exercise not in EXERCISES:
+            return "unknown"
+        self.buf.append(exercise)
+        counts = collections.Counter(self.buf)
+        top_ex, top_votes = counts.most_common(1)[0]
+        return top_ex if top_votes >= self.min_votes else "unknown"
+
+
 class StageTransitionCounter:
     """
     Counts one rep for each stable down->up completion.
@@ -166,6 +183,57 @@ class StageTransitionCounter:
         else:
             self._down_streak = 0
             self._up_streak = 0
+        return self.reps
+
+
+class SignalRepCounter:
+    """
+    Rep counter from motion cycles using adaptive low/high thresholds.
+    Counts on high->low transition (down->up) of the selected joint signal.
+    """
+    def __init__(self, min_range=0.06, cooldown_frames=8):
+        self.min_range = float(min_range)
+        self.cooldown_frames = max(0, int(cooldown_frames))
+        self.values = collections.deque(maxlen=120)
+        self.reps = 0
+        self.phase = "unknown"  # "high" or "low"
+        self._frame_idx = 0
+        self._last_rep_frame = -10**9
+
+    def reset(self):
+        self.values.clear()
+        self.reps = 0
+        self.phase = "unknown"
+        self._frame_idx = 0
+        self._last_rep_frame = -10**9
+
+    def update(self, value: float) -> int:
+        self._frame_idx += 1
+        self.values.append(float(value))
+        if len(self.values) < 20:
+            return self.reps
+
+        arr = np.array(self.values, dtype=float)
+        lo = np.percentile(arr, 20)
+        hi = np.percentile(arr, 80)
+        rng = hi - lo
+        if rng < self.min_range:
+            return self.reps
+
+        low_thr = lo + 0.25 * rng
+        high_thr = lo + 0.75 * rng
+        new_phase = self.phase
+        if value <= low_thr:
+            new_phase = "low"
+        elif value >= high_thr:
+            new_phase = "high"
+
+        if self.phase == "high" and new_phase == "low":
+            if (self._frame_idx - self._last_rep_frame) >= self.cooldown_frames:
+                self.reps += 1
+                self._last_rep_frame = self._frame_idx
+
+        self.phase = new_phase
         return self.reps
 
 
@@ -516,11 +584,13 @@ def run(source, clf_path, output_path, min_confidence, min_stage_frames, rep_coo
     confidence     = 0.0
     form_feedback  = []
     stage_smoother = StageSmoother(window=5, min_votes=3)
+    exercise_smoother = ExerciseSmoother(window=15, min_votes=8)
     rep_counter    = StageTransitionCounter(
         min_down_frames=min_stage_frames,
         min_up_frames=min_stage_frames,
         cooldown_frames=rep_cooldown_frames,
     )
+    signal_counter = SignalRepCounter(min_range=0.06, cooldown_frames=rep_cooldown_frames)
     set_tracker    = SetTracker(reps_per_set=reps_per_set, target_sets=target_sets)
     frame_idx      = 0
     t0             = time.time()
@@ -549,13 +619,19 @@ def run(source, clf_path, output_path, min_confidence, min_stage_frames, rep_coo
                     pose_label = normalize_label(raw_label)
                     pred_ex, pred_stage = split_label(pose_label)
                     if confidence < min_confidence:
+                        pred_ex = "unknown"
                         pred_stage = "unknown"
-                    if pred_ex in EXERCISES:
-                        if pred_ex != exercise:
-                            exercise = pred_ex
+                    stable_ex = exercise_smoother.update(pred_ex)
+                    if stable_ex in EXERCISES:
+                        if stable_ex != exercise:
+                            exercise = stable_ex
+                            pose_label = f"{exercise}_{stage}"
+                            confidence = 0.0
+                            pred_stage = "unknown"
                             signal_buf.clear()
                             stage_smoother.reset()
                             rep_counter.reset()
+                            signal_counter.reset()
                             set_tracker.reset()
                         observed_stage = stage_smoother.update(pred_stage)
                         if observed_stage != "unknown":
@@ -565,6 +641,9 @@ def run(source, clf_path, output_path, min_confidence, min_stage_frames, rep_coo
                             rep_counter.update(observed_stage)
                         else:
                             rep_counter.update("unknown")
+                    elif pred_ex in EXERCISES:
+                        # Keep collecting exercise votes, but don't switch yet.
+                        pass
                     else:
                         stage = "unknown"
 
@@ -573,7 +652,9 @@ def run(source, clf_path, output_path, min_confidence, min_stage_frames, rep_coo
                 jname  = ex_cfg["signal_joint"]
                 jidx   = LM.get(jname, 25)
                 if jidx < len(lm_norm):
-                    signal_buf.append(float(lm_norm[jidx, 1]))
+                    sig_val = float(lm_norm[jidx, 1])
+                    signal_buf.append(sig_val)
+                    signal_counter.update(sig_val)
 
                 # Form check every 5 frames
                 if frame_idx % 5 == 0:
@@ -582,7 +663,10 @@ def run(source, clf_path, output_path, min_confidence, min_stage_frames, rep_coo
             sig    = np.array(signal_buf)
             ex_cfg = EXERCISES.get(exercise, EXERCISES["squat"])
             n_reps_signal, peaks = count_reps_stateful(sig, ex_cfg["invert"])
-            n_reps = rep_counter.reps if clf_dict is not None else n_reps_signal
+            if clf_dict is not None:
+                n_reps = max(rep_counter.reps, signal_counter.reps)
+            else:
+                n_reps = n_reps_signal
             set_tracker.update_total_reps(n_reps)
 
             draw_hud(
