@@ -1,2 +1,2 @@
-# bloopercutter
-Goal: To find bloopers in videos and auto cut them. Send it Davinci Resolve to make the editing process faster
+# Exercise Pose Detector and Form Judger
+Goal: To use ML to analyze form of exercises and judge the user's form on their workouts.
