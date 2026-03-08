@@ -32,13 +32,14 @@ All five CSVs share the same `pose_id` index (one row = one frame/pose).
 ### `labels.csv`
 ```
 pose_id,pose
-0,jumping_jacks_down
-1,jumping_jacks_up
-2,squats_down
+0,jumpingjack_down
+1,jumpingjack_up
+2,squat_down
 ...
 ```
-**10 classes:** `jumping_jacks_up/down`, `pushups_up/down`, `pull_ups_up/down`,  
-`situps_up/down`, `squats_up/down`
+Canonical classes follow `<exercise>_<stage>`:
+`jumpingjack_up/down/rest`, `pushup_up/down/rest`, `pullup_up/down/rest`,
+`situp_up/down/rest`, `squat_up/down/rest`
 
 ### `landmarks.csv`
 33 MediaPipe landmarks × x, y, z  
@@ -69,13 +70,14 @@ Per-axis distances:
 ### Rep Counting
 | Exercise      | Signal joint  | Counts    |
 |--------------|--------------|-----------|
-| squats        | left knee Y   | valleys   |
-| pushups       | left elbow Y  | peaks     |
-| pull_ups      | left wrist Y  | peaks     |
-| situps        | nose Y        | peaks     |
-| jumping_jacks | left wrist Y  | peaks     |
+| squat         | left knee Y   | down→up transitions |
+| pushup        | left elbow Y  | down→up transitions |
+| pullup        | left wrist Y  | down→up transitions |
+| situp         | nose Y        | down→up transitions |
+| jumpingjack   | left wrist Y  | down→up transitions |
 
-Savitzky-Golay smoothing → `scipy.find_peaks` → rep count
+Per-frame stage prediction is smoothed and reps are counted via stage transitions (`up → down → up`).
+Signal smoothing + `scipy.find_peaks` is still rendered for the movement graph.
 
 ### Form Feedback
 Real-time joint angle checks displayed as colour-coded overlays:
@@ -84,11 +86,11 @@ Real-time joint angle checks displayed as colour-coded overlays:
 
 | Exercise      | Checks |
 |--------------|--------|
-| squats        | depth, torso lean, knee tracking |
-| pushups       | arm extension, back sag, range |
-| pull_ups      | chin height, bottom extension |
-| situps        | crunch depth, neck position |
-| jumping_jacks | arm height, leg spread |
+| squat         | depth, torso lean, knee tracking |
+| pushup        | arm extension, back sag, range |
+| pullup        | chin height, bottom extension |
+| situp         | crunch depth, neck position |
+| jumpingjack   | arm height, leg spread |
 
 ---
 

@@ -18,6 +18,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter, find_peaks
+from stage_labels import normalize_label, split_label
 
 # ── MediaPipe landmark indices ────────────────────────────────────────────────
 LM = {
@@ -39,9 +40,10 @@ MP_CONNECTIONS = [
 # ── Exercise state machines ───────────────────────────────────────────────────
 # Maps base exercise name → (up_label, down_label, rep_signal_fn, form_checks)
 EXERCISES = {
-    "jumping_jacks": {
-        "up":   "jumping_jacks_up",
-        "down": "jumping_jacks_down",
+    "jumpingjack": {
+        "up":   "jumpingjack_up",
+        "down": "jumpingjack_down",
+        "rest": "jumpingjack_rest",
         "signal_joint": "left_wrist",   # wrist Y for signal
         "invert": True,                 # up = low Y value
         "form": [
@@ -49,9 +51,10 @@ EXERCISES = {
             ("legs_spread",    "Spread legs wider"),
         ]
     },
-    "pushups": {
-        "up":   "pushups_up",
-        "down": "pushups_down",
+    "pushup": {
+        "up":   "pushup_up",
+        "down": "pushup_down",
+        "rest": "pushup_rest",
         "signal_joint": "left_elbow",
         "invert": False,
         "form": [
@@ -60,9 +63,10 @@ EXERCISES = {
             ("full_extension", "Fully extend arms at top"),
         ]
     },
-    "pull_ups": {
-        "up":   "pull_ups_up",
-        "down": "pull_ups_down",
+    "pullup": {
+        "up":   "pullup_up",
+        "down": "pullup_down",
+        "rest": "pullup_rest",
         "signal_joint": "left_wrist",
         "invert": True,
         "form": [
@@ -71,9 +75,10 @@ EXERCISES = {
             ("no_swinging",    "Control the swing"),
         ]
     },
-    "situps": {
-        "up":   "situps_up",
-        "down": "situps_down",
+    "situp": {
+        "up":   "situp_up",
+        "down": "situp_down",
+        "rest": "situp_rest",
         "signal_joint": "nose",
         "invert": True,
         "form": [
@@ -82,9 +87,10 @@ EXERCISES = {
             ("neck_neutral",   "Keep neck neutral"),
         ]
     },
-    "squats": {
-        "up":   "squats_up",
-        "down": "squats_down",
+    "squat": {
+        "up":   "squat_up",
+        "down": "squat_down",
+        "rest": "squat_rest",
         "signal_joint": "left_knee",
         "invert": False,
         "form": [
@@ -96,12 +102,43 @@ EXERCISES = {
     },
 }
 
-# Map pose label → exercise name
-def label_to_exercise(label: str) -> str:
-    for ex in EXERCISES:
-        if label.startswith(ex):
-            return ex
-    return "unknown"
+class StageSmoother:
+    def __init__(self, window=5, min_votes=3):
+        self.window = window
+        self.min_votes = min_votes
+        self.buf = collections.deque(maxlen=window)
+
+    def reset(self):
+        self.buf.clear()
+
+    def update(self, stage: str) -> str:
+        if stage not in {"up", "down", "rest"}:
+            return "unknown"
+        self.buf.append(stage)
+        counts = collections.Counter(self.buf)
+        top_stage, top_votes = counts.most_common(1)[0]
+        return top_stage if top_votes >= self.min_votes else "unknown"
+
+
+class StageTransitionCounter:
+    """
+    Counts one rep for each stable down->up completion.
+    """
+    def __init__(self):
+        self.reps = 0
+        self._seen_down = False
+
+    def reset(self):
+        self.reps = 0
+        self._seen_down = False
+
+    def update(self, stage: str) -> int:
+        if stage == "down":
+            self._seen_down = True
+        elif stage == "up" and self._seen_down:
+            self.reps += 1
+            self._seen_down = False
+        return self.reps
 
 
 # ── Angle helpers ──────────────────────────────────────────────────────────────
@@ -184,7 +221,7 @@ def check_form(exercise: str, lm: np.ndarray) -> list[tuple[str, bool]]:
     def ang(a, b, c):
         return angle3(lm[a], lm[b], lm[c])
 
-    if exercise == "squats":
+    if exercise == "squat":
         knee_angle   = ang(23, 25, 27)   # left hip→knee→ankle
         torso_angle  = ang(25, 23, 11)   # knee→hip→shoulder (lean)
         knee_dist    = abs(lm[25, 0] - lm[27, 0])  # knee vs ankle X
@@ -194,7 +231,7 @@ def check_form(exercise: str, lm: np.ndarray) -> list[tuple[str, bool]]:
             ("Push knees over toes",            knee_dist < 0.03),
         ]
 
-    elif exercise == "pushups":
+    elif exercise == "pushup":
         elbow_angle  = ang(11, 13, 15)
         hip_y        = (lm[23, 1] + lm[24, 1]) / 2
         shoulder_y   = (lm[11, 1] + lm[12, 1]) / 2
@@ -205,7 +242,7 @@ def check_form(exercise: str, lm: np.ndarray) -> list[tuple[str, bool]]:
             ("Lower chest to ground",      elbow_angle > 80),
         ]
 
-    elif exercise == "pull_ups":
+    elif exercise == "pullup":
         elbow_angle  = ang(11, 13, 15)
         wrist_y      = (lm[15, 1] + lm[16, 1]) / 2
         shoulder_y   = (lm[11, 1] + lm[12, 1]) / 2
@@ -214,14 +251,14 @@ def check_form(exercise: str, lm: np.ndarray) -> list[tuple[str, bool]]:
             ("Fully extend at bottom",      elbow_angle < 150),
         ]
 
-    elif exercise == "situps":
+    elif exercise == "situp":
         torso_angle  = ang(25, 23, 11)
         issues = [
             ("Crunch all the way up",      torso_angle < 50),
             ("Keep neck neutral",          True),  # always remind
         ]
 
-    elif exercise == "jumping_jacks":
+    elif exercise == "jumpingjack":
         wrist_dist   = abs(lm[15, 0] - lm[16, 0])
         ankle_dist   = abs(lm[27, 0] - lm[28, 0])
         wrist_y_avg  = (lm[15, 1] + lm[16, 1]) / 2
@@ -296,7 +333,7 @@ COLORS = {
     "rep":   (0, 255, 200),
 }
 
-def draw_hud(frame, exercise, n_reps, confidence, pose_label, form_feedback, fps):
+def draw_hud(frame, exercise, stage, n_reps, confidence, pose_label, form_feedback, fps):
     h, w = frame.shape[:2]
     ov = frame.copy()
     cv2.rectangle(ov, (0, 0), (w, 64), (5, 8, 18), -1)
@@ -316,6 +353,8 @@ def draw_hud(frame, exercise, n_reps, confidence, pose_label, form_feedback, fps
     # Pose label
     cv2.putText(frame, pose_label.replace("_", " "),
                 (140, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLORS["dim"], 1, cv2.LINE_AA)
+    cv2.putText(frame, f"stage: {stage}",
+                (w - 160, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLORS["dim"], 1, cv2.LINE_AA)
 
     # FPS
     cv2.putText(frame, f"{fps:.0f} fps", (w - 90, 22),
@@ -393,12 +432,16 @@ def run(source, clf_path, output_path):
                                   fps_out, (fw, total_h))
 
     signal_buf     = collections.deque(maxlen=400)
-    exercise       = "squats"
+    exercise       = "squat"
+    stage          = "rest"
     pose_label     = "unknown"
     confidence     = 0.0
     form_feedback  = []
+    stage_smoother = StageSmoother(window=5, min_votes=3)
+    rep_counter    = StageTransitionCounter()
     frame_idx      = 0
     t0             = time.time()
+    ex_cfg         = EXERCISES[exercise]
 
     with mp_pose.Pose(min_detection_confidence=0.5,
                       min_tracking_confidence=0.5) as pose:
@@ -419,11 +462,25 @@ def run(source, clf_path, output_path):
                 if clf_dict is not None:
                     from train_classifier import predict_pose
                     feats    = extract_mediapipe_features(lm_norm)
-                    pose_label, confidence, _ = predict_pose(clf_dict, feats)
-                    exercise = label_to_exercise(pose_label)
+                    raw_label, confidence, _ = predict_pose(clf_dict, feats)
+                    pose_label = normalize_label(raw_label)
+                    pred_ex, pred_stage = split_label(pose_label)
+                    if pred_ex in EXERCISES:
+                        if pred_ex != exercise:
+                            exercise = pred_ex
+                            signal_buf.clear()
+                            stage_smoother.reset()
+                            rep_counter.reset()
+                        stable_stage = stage_smoother.update(pred_stage)
+                        if stable_stage != "unknown":
+                            stage = stable_stage
+                        if stage in {"up", "down"}:
+                            rep_counter.update(stage)
+                    else:
+                        stage = "unknown"
 
                 # Build signal
-                ex_cfg = EXERCISES.get(exercise, EXERCISES["squats"])
+                ex_cfg = EXERCISES.get(exercise, EXERCISES["squat"])
                 jname  = ex_cfg["signal_joint"]
                 jidx   = LM.get(jname, 25)
                 if jidx < len(lm_norm):
@@ -434,10 +491,11 @@ def run(source, clf_path, output_path):
                     form_feedback = check_form(exercise, lm_norm)
 
             sig    = np.array(signal_buf)
-            ex_cfg = EXERCISES.get(exercise, EXERCISES["squats"])
-            n_reps, peaks = count_reps_stateful(sig, ex_cfg["invert"])
+            ex_cfg = EXERCISES.get(exercise, EXERCISES["squat"])
+            n_reps_signal, peaks = count_reps_stateful(sig, ex_cfg["invert"])
+            n_reps = rep_counter.reps if clf_dict is not None else n_reps_signal
 
-            draw_hud(frame, exercise, n_reps, confidence,
+            draw_hud(frame, exercise, stage, n_reps, confidence,
                      pose_label, form_feedback, fps)
 
             graph = render_graph(sig, peaks, exercise, n_reps, w=fw, h=150)
@@ -458,7 +516,8 @@ def run(source, clf_path, output_path):
 
     # Save final graph
     sig = np.array(signal_buf)
-    n_reps, peaks = count_reps_stateful(sig, ex_cfg["invert"])
+    n_reps_signal, peaks = count_reps_stateful(sig, ex_cfg["invert"])
+    n_reps = rep_counter.reps if clf_dict is not None else n_reps_signal
     _save_final_graph(sig, peaks, exercise, n_reps)
     print(f"\n✅ Finished. Last exercise: {exercise} | Reps: {n_reps}")
 
