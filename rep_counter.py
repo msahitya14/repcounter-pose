@@ -124,21 +124,92 @@ class StageTransitionCounter:
     """
     Counts one rep for each stable down->up completion.
     """
-    def __init__(self):
+    def __init__(self, min_down_frames=2, min_up_frames=2, cooldown_frames=8):
+        self.min_down_frames = max(1, int(min_down_frames))
+        self.min_up_frames = max(1, int(min_up_frames))
+        self.cooldown_frames = max(0, int(cooldown_frames))
         self.reps = 0
         self._seen_down = False
+        self._down_streak = 0
+        self._up_streak = 0
+        self._frame_idx = 0
+        self._last_rep_frame = -10**9
 
     def reset(self):
         self.reps = 0
         self._seen_down = False
+        self._down_streak = 0
+        self._up_streak = 0
+        self._frame_idx = 0
+        self._last_rep_frame = -10**9
 
     def update(self, stage: str) -> int:
+        self._frame_idx += 1
         if stage == "down":
-            self._seen_down = True
-        elif stage == "up" and self._seen_down:
-            self.reps += 1
-            self._seen_down = False
+            self._down_streak += 1
+            self._up_streak = 0
+            if self._down_streak >= self.min_down_frames:
+                self._seen_down = True
+        elif stage == "up":
+            self._up_streak += 1
+            self._down_streak = 0
+            can_count = (
+                self._seen_down
+                and self._up_streak >= self.min_up_frames
+                and (self._frame_idx - self._last_rep_frame) >= self.cooldown_frames
+            )
+            if can_count:
+                self.reps += 1
+                self._seen_down = False
+                self._up_streak = 0
+                self._last_rep_frame = self._frame_idx
+        else:
+            self._down_streak = 0
+            self._up_streak = 0
         return self.reps
+
+
+class SetTracker:
+    """
+    Tracks per-set reps from a monotonic total rep count.
+    """
+    def __init__(self, reps_per_set=10, target_sets=3):
+        self.reps_per_set = max(1, int(reps_per_set))
+        self.target_sets = max(1, int(target_sets))
+        self.total_reps = 0
+        self.current_set = 1
+        self.reps_in_set = 0
+        self.completed_sets = 0
+        self.workout_done = False
+
+    def reset(self):
+        self.total_reps = 0
+        self.current_set = 1
+        self.reps_in_set = 0
+        self.completed_sets = 0
+        self.workout_done = False
+
+    def update_total_reps(self, total_reps: int) -> bool:
+        """
+        Returns True when a new rep event is consumed.
+        """
+        if total_reps <= self.total_reps or self.workout_done:
+            return False
+
+        rep_delta = total_reps - self.total_reps
+        self.total_reps = total_reps
+
+        for _ in range(rep_delta):
+            self.reps_in_set += 1
+            if self.reps_in_set >= self.reps_per_set:
+                self.completed_sets += 1
+                self.reps_in_set = 0
+                if self.completed_sets >= self.target_sets:
+                    self.workout_done = True
+                    self.current_set = self.target_sets
+                else:
+                    self.current_set = self.completed_sets + 1
+        return True
 
 
 # ── Angle helpers ──────────────────────────────────────────────────────────────
@@ -333,7 +404,8 @@ COLORS = {
     "rep":   (0, 255, 200),
 }
 
-def draw_hud(frame, exercise, stage, n_reps, confidence, pose_label, form_feedback, fps):
+def draw_hud(frame, exercise, stage, n_reps, confidence, pose_label,
+             form_feedback, fps, current_set, reps_in_set, reps_per_set, workout_done):
     h, w = frame.shape[:2]
     ov = frame.copy()
     cv2.rectangle(ov, (0, 0), (w, 64), (5, 8, 18), -1)
@@ -344,6 +416,8 @@ def draw_hud(frame, exercise, stage, n_reps, confidence, pose_label, form_feedba
                 cv2.FONT_HERSHEY_DUPLEX, 2.0, COLORS["rep"], 3, cv2.LINE_AA)
     cv2.putText(frame, "REPS", (76, 34),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLORS["dim"], 1, cv2.LINE_AA)
+    cv2.putText(frame, f"SET {current_set}  {reps_in_set}/{reps_per_set}",
+                (16, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLORS["white"], 1, cv2.LINE_AA)
 
     # Exercise + confidence
     ex_str = exercise.upper().replace("_", " ")
@@ -355,6 +429,9 @@ def draw_hud(frame, exercise, stage, n_reps, confidence, pose_label, form_feedba
                 (140, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLORS["dim"], 1, cv2.LINE_AA)
     cv2.putText(frame, f"stage: {stage}",
                 (w - 160, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLORS["dim"], 1, cv2.LINE_AA)
+    if workout_done:
+        cv2.putText(frame, "WORKOUT COMPLETE", (w // 2 - 120, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLORS["good"], 2, cv2.LINE_AA)
 
     # FPS
     cv2.putText(frame, f"{fps:.0f} fps", (w - 90, 22),
@@ -400,7 +477,8 @@ def draw_skeleton(frame, results, conf_thr=0.5):
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
-def run(source, clf_path, output_path):
+def run(source, clf_path, output_path, min_confidence, min_stage_frames, rep_cooldown_frames,
+        reps_per_set, target_sets):
     try:
         import mediapipe as mp
         mp_pose = mp.solutions.pose
@@ -438,7 +516,12 @@ def run(source, clf_path, output_path):
     confidence     = 0.0
     form_feedback  = []
     stage_smoother = StageSmoother(window=5, min_votes=3)
-    rep_counter    = StageTransitionCounter()
+    rep_counter    = StageTransitionCounter(
+        min_down_frames=min_stage_frames,
+        min_up_frames=min_stage_frames,
+        cooldown_frames=rep_cooldown_frames,
+    )
+    set_tracker    = SetTracker(reps_per_set=reps_per_set, target_sets=target_sets)
     frame_idx      = 0
     t0             = time.time()
     ex_cfg         = EXERCISES[exercise]
@@ -465,17 +548,23 @@ def run(source, clf_path, output_path):
                     raw_label, confidence, _ = predict_pose(clf_dict, feats)
                     pose_label = normalize_label(raw_label)
                     pred_ex, pred_stage = split_label(pose_label)
+                    if confidence < min_confidence:
+                        pred_stage = "unknown"
                     if pred_ex in EXERCISES:
                         if pred_ex != exercise:
                             exercise = pred_ex
                             signal_buf.clear()
                             stage_smoother.reset()
                             rep_counter.reset()
-                        stable_stage = stage_smoother.update(pred_stage)
-                        if stable_stage != "unknown":
-                            stage = stable_stage
-                        if stage in {"up", "down"}:
-                            rep_counter.update(stage)
+                            set_tracker.reset()
+                        observed_stage = stage_smoother.update(pred_stage)
+                        if observed_stage != "unknown":
+                            stage = observed_stage
+                        # Only advance counter on frames where stage is stable.
+                        if observed_stage in {"up", "down", "rest"}:
+                            rep_counter.update(observed_stage)
+                        else:
+                            rep_counter.update("unknown")
                     else:
                         stage = "unknown"
 
@@ -494,9 +583,16 @@ def run(source, clf_path, output_path):
             ex_cfg = EXERCISES.get(exercise, EXERCISES["squat"])
             n_reps_signal, peaks = count_reps_stateful(sig, ex_cfg["invert"])
             n_reps = rep_counter.reps if clf_dict is not None else n_reps_signal
+            set_tracker.update_total_reps(n_reps)
 
-            draw_hud(frame, exercise, stage, n_reps, confidence,
-                     pose_label, form_feedback, fps)
+            draw_hud(
+                frame, exercise, stage, n_reps, confidence,
+                pose_label, form_feedback, fps,
+                current_set=set_tracker.current_set,
+                reps_in_set=set_tracker.reps_in_set,
+                reps_per_set=set_tracker.reps_per_set,
+                workout_done=set_tracker.workout_done,
+            )
 
             graph = render_graph(sig, peaks, exercise, n_reps, w=fw, h=150)
             if graph.shape[1] != fw:
@@ -554,5 +650,24 @@ if __name__ == "__main__":
     p.add_argument("--source",  required=True, help="Webcam index or video path")
     p.add_argument("--clf",     default=None,  help="Classifier .pkl path")
     p.add_argument("--output",  default=None,  help="Save output video")
+    p.add_argument("--min_confidence", type=float, default=0.55,
+                   help="Minimum classifier confidence for stage updates")
+    p.add_argument("--min_stage_frames", type=int, default=2,
+                   help="Minimum consecutive frames per stage before transitions are accepted")
+    p.add_argument("--rep_cooldown_frames", type=int, default=8,
+                   help="Minimum frame gap between counted reps")
+    p.add_argument("--reps_per_set", type=int, default=10,
+                   help="Number of reps needed to complete one set")
+    p.add_argument("--target_sets", type=int, default=3,
+                   help="Workout target number of sets")
     args = p.parse_args()
-    run(args.source, args.clf, args.output)
+    run(
+        args.source,
+        args.clf,
+        args.output,
+        min_confidence=args.min_confidence,
+        min_stage_frames=args.min_stage_frames,
+        rep_cooldown_frames=args.rep_cooldown_frames,
+        reps_per_set=args.reps_per_set,
+        target_sets=args.target_sets,
+    )
