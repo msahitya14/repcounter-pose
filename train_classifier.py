@@ -8,7 +8,7 @@ Expected files (all share the same pose_id index):
   data/angles.csv         – pose_id + joint angles
   data/3d_distances.csv   – pose_id + 3-D distances between landmark pairs
   data/xyz_distances.csv  – pose_id + per-axis distances
-  data/labels.csv         – pose_id + pose  (e.g. "squats_down")
+  data/labels.csv         – pose_id + pose  (e.g. "squat_down")
 
 Outputs:
   models/classifier.pkl   – trained pipeline (scaler + GBM)
@@ -31,6 +31,8 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import classification_report, confusion_matrix
+
+from stage_labels import normalize_label, split_label
 
 
 # ── MediaPipe landmark names (33) ─────────────────────────────────────────────
@@ -60,6 +62,19 @@ def load_and_merge(data_dir: str) -> pd.DataFrame:
 
     labels = pd.read_csv(labels_path)
     labels.columns = [c.strip() for c in labels.columns]
+    labels["pose"] = labels["pose"].astype(str).map(normalize_label)
+
+    invalid = []
+    for label in labels["pose"].unique():
+        ex, stage = split_label(label)
+        if ex == "unknown" or stage == "unknown":
+            invalid.append(label)
+    if invalid:
+        bad = ", ".join(sorted(invalid)[:10])
+        raise ValueError(
+            "Unrecognized stage labels found after normalization. "
+            f"Examples: {bad}"
+        )
 
     merged = labels.copy()
     for name, path in files.items():

@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
+from stage_labels import CANONICAL_EXERCISES
+
 # ── MediaPipe landmark names (33) ──────────────────────────────────────────────
 MP_NAMES = [
     "nose","left_eye_inner","left_eye","left_eye_outer",
@@ -75,29 +77,29 @@ def gen_pose(exercise: str, phase: float) -> np.ndarray:
     p = base_standing()
     t = phase
 
-    if exercise == "squats":
+    if exercise == "squat":
         # Hips sink, knees bend
         p[23:29, 1] += t * 25
         p[25, 1] += t * 10; p[26, 1] += t * 10
         p[13, 1] += t * 5;  p[14, 1] += t * 5
 
-    elif exercise == "pushups":
+    elif exercise == "pushup":
         # Whole body horizontal, elbow bend
         p[:, 1] += 30
         p[13, 1] += t * 12; p[14, 1] += t * 12
         p[15, 1] += t * 12; p[16, 1] += t * 12
 
-    elif exercise == "pull_ups":
+    elif exercise == "pullup":
         # Wrists above head
         p[15, 1] -= (1 - t) * 40; p[16, 1] -= (1 - t) * 40
         p[13, 1] -= (1 - t) * 20; p[14, 1] -= (1 - t) * 20
 
-    elif exercise == "situps":
+    elif exercise == "situp":
         # Nose rises up
         p[0:12, 1] -= t * 30
         p[11, 1] -= t * 15; p[12, 1] -= t * 15
 
-    elif exercise == "jumping_jacks":
+    elif exercise == "jumpingjack":
         # Arms rise, legs spread
         spread = t
         p[15, 0] += spread * 40; p[16, 0] -= spread * 40
@@ -148,10 +150,10 @@ def lm_to_distxyz(p):
 
 
 # ── Generate dataset ───────────────────────────────────────────────────────────
-EXERCISES = ["squats","pushups","pull_ups","situps","jumping_jacks"]
-STATES     = {"up": 0.0, "down": 1.0}
+EXERCISES = list(CANONICAL_EXERCISES)
+STATES = {"up": 0.0, "down": 1.0}
 
-def create_dataset(out_dir="data", n_per_class=150):
+def create_dataset(out_dir="data", n_per_class=150, n_rest_per_exercise=0):
     out = Path(out_dir); out.mkdir(exist_ok=True)
 
     lm_rows, ang_rows, dist3_rows, distxyz_rows, label_rows = [], [], [], [], []
@@ -159,7 +161,7 @@ def create_dataset(out_dir="data", n_per_class=150):
 
     for ex in EXERCISES:
         for state, phase_val in STATES.items():
-            label = f"{ex}_{state}" if ex != "pushups" else f"pushups_{state}"
+            label = f"{ex}_{state}"
             for _ in range(n_per_class):
                 phase = phase_val + np.random.uniform(-0.15, 0.15)
                 phase = np.clip(phase, 0, 1)
@@ -188,6 +190,31 @@ def create_dataset(out_dir="data", n_per_class=150):
                 label_rows.append({"pose_id": pid, "pose": label})
                 pid += 1
 
+        for _ in range(max(0, n_rest_per_exercise)):
+            p = gen_pose(ex, phase=0.25)
+
+            lm_row = {"pose_id": pid}
+            for i, name in enumerate(MP_NAMES):
+                lm_row[f"x_{name}"] = p[i, 0]
+                lm_row[f"y_{name}"] = p[i, 1]
+                lm_row[f"z_{name}"] = p[i, 2]
+            lm_rows.append(lm_row)
+
+            ang_row = {"pose_id": pid}
+            ang_row.update(lm_to_angles(p))
+            ang_rows.append(ang_row)
+
+            d3_row = {"pose_id": pid}
+            d3_row.update(lm_to_dist3d(p))
+            dist3_rows.append(d3_row)
+
+            dxyz_row = {"pose_id": pid}
+            dxyz_row.update(lm_to_distxyz(p))
+            distxyz_rows.append(dxyz_row)
+
+            label_rows.append({"pose_id": pid, "pose": f"{ex}_rest"})
+            pid += 1
+
     pd.DataFrame(lm_rows).to_csv(out / "landmarks.csv", index=False)
     pd.DataFrame(ang_rows).to_csv(out / "angles.csv", index=False)
     pd.DataFrame(dist3_rows).to_csv(out / "3d_distances.csv", index=False)
@@ -205,8 +232,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--out", default="data")
     p.add_argument("--n",   type=int, default=150)
+    p.add_argument("--n_rest", type=int, default=0,
+                   help="Optional rest examples per exercise")
     args = p.parse_args()
-    create_dataset(args.out, args.n)
+    create_dataset(args.out, args.n, args.n_rest)
     print("\nNext:")
     print("  python train_classifier.py --data_dir data/ --model_out models/classifier.pkl")
     print("  python rep_counter.py --source 0 --clf models/classifier.pkl")
