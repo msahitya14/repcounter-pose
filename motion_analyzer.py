@@ -11,6 +11,7 @@ import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Tuple, List
+from stage_labels import split_label
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MediaPipe BlazePose 33-point landmark indices
@@ -50,21 +51,54 @@ ANGLE_DEFS = [
 # Which angle is the BEST rep signal for each exercise (after LLM classifies).
 # ─────────────────────────────────────────────────────────────────────────────
 EXERCISE_SIGNAL = {
+    # Canonical exercise ids (stage_labels.py)
+    "squat":           "left_knee",
+    "pushup":          "left_elbow",
+    "pullup":          "left_elbow",
+    "situp":           "trunk",
+    "jumpingjack":     "arm_spread",
+
+    # Common aliases from older branches / LLM outputs
     "squats":          "left_knee",
     "lunges":          "left_knee",
     "push-ups":        "left_elbow",
+    "pushup_up":       "left_elbow",
+    "pushup_down":     "left_elbow",
     "pull-ups":        "left_elbow",
+    "pullup_up":       "left_elbow",
+    "pullup_down":     "left_elbow",
     "bicep curls":     "left_elbow",
     "shoulder press":  "left_shoulder",
     "sit-ups":         "trunk",
+    "situp_up":        "trunk",
+    "situp_down":      "trunk",
     "crunches":        "trunk",
     "jumping jacks":   "arm_spread",
+    "jumpingjack_up":  "arm_spread",
+    "jumpingjack_down":"arm_spread",
     "burpees":         "left_knee",
     "mountain climbers": "left_knee",
     "plank":           "trunk",
     # fallback
     "unknown":         None,
 }
+
+
+def _normalize_exercise_key(exercise):
+    """
+    Convert incoming exercise labels from different branches/contracts into a
+    key that can be used with EXERCISE_SIGNAL.
+    """
+    if not exercise:
+        return ""
+    s = str(exercise).strip().lower().replace("-", "_").replace(" ", "_")
+
+    # If this is a stage label contract (<exercise>_<stage>), resolve exercise.
+    ex, _ = split_label(s)
+    if ex != "unknown":
+        return ex
+
+    return s
 
 # Joint groups for activity fingerprinting
 JOINT_GROUPS = {
@@ -302,8 +336,9 @@ class MotionAnalyzer:
         Otherwise, pick the angle with the highest rep count (most active).
         """
         # If we know the exercise, use its signal
-        if exercise and exercise.lower() in EXERCISE_SIGNAL:
-            sig_name = EXERCISE_SIGNAL[exercise.lower()]
+        ex_key = _normalize_exercise_key(exercise)
+        if ex_key in EXERCISE_SIGNAL:
+            sig_name = EXERCISE_SIGNAL[ex_key]
             if sig_name and sig_name in self.trackers:
                 n, revs = self.trackers[sig_name].rep_count()
                 return n, sig_name, revs

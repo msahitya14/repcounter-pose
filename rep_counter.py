@@ -1,29 +1,33 @@
 """
 rep_counter.py
 ==============
-Live webcam rep counter + Ollama exercise classifier.
+Live rep counter with synchronized:
+  - ML stage classification (classifier.pkl from train_classifier.py)
+  - Signal-based motion analysis / graphing
+  - Optional LLM form-feedback enrichment
 
-  MediaPipe Pose -> MotionAnalyzer (zero-crossing rep count)
-                -> Activity fingerprint change detection
-                -> LLMClassifier (Ollama) on exercise change
-                -> HUD + movement graph
+  MediaPipe Pose -> feature extraction -> stage classifier
+                 -> stage-transition rep counting
+                 -> MotionAnalyzer graph/activity
+                 -> optional LLM on activity changes
 
 Usage:
-  python rep_counter.py
-  python rep_counter.py --model qwen3
-  python rep_counter.py --no_llm
-  python rep_counter.py --output out.mp4
+  python rep_counter.py --source 0 --clf models/classifier.pkl
+  python rep_counter.py --source workout.mp4 --clf models/classifier.pkl --output out.mp4
+  python rep_counter.py --source 0 --clf models/classifier.pkl --no_llm
 
 Controls:  Q quit | R reset | C classify now | S save graph
 """
 
-import argparse, os, time, threading, urllib.request
+import argparse, collections, os, time, threading, urllib.request
 import cv2, numpy as np
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from motion_analyzer import MotionAnalyzer, _smooth, EXERCISE_SIGNAL
+from motion_analyzer import MotionAnalyzer, _smooth
 from llm_classifier  import LLMClassifier, ClassificationResult
+from stage_labels import normalize_label, split_label
+from train_classifier import MP_LANDMARKS, load_model, predict_pose
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MediaPipe model download
@@ -149,6 +153,105 @@ def draw_activity_bars(frame, activity_dict):
         cv2.putText(frame, g[:3], (bx, y0+bar_h_max+12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.30, (80,90,120), 1, cv2.LINE_AA)
 
+
+def _angle(a, b, c):
+    ba = a - b
+    bc = c - b
+    cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-8)
+    return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
+
+
+def _extract_classifier_features(landmarks):
+    """
+    Build one feature row matching train_classifier.py merged/renamed feature
+    schema: landmarks__, angles__, dist3d__, distxyz__.
+    """
+    if landmarks is None:
+        return None
+
+    lm_list = landmarks.landmark if hasattr(landmarks, "landmark") else landmarks
+    if lm_list is None or len(lm_list) < 33:
+        return None
+
+    p = np.array([[l.x, l.y, l.z] for l in lm_list], dtype=np.float32)
+
+    row = {}
+    for i, name in enumerate(MP_LANDMARKS):
+        row["landmarks__x_{}".format(name)] = float(p[i, 0])
+        row["landmarks__y_{}".format(name)] = float(p[i, 1])
+        row["landmarks__z_{}".format(name)] = float(p[i, 2])
+
+    angles = {
+        "left_elbow_angle": _angle(p[11], p[13], p[15]),
+        "right_elbow_angle": _angle(p[12], p[14], p[16]),
+        "left_knee_angle": _angle(p[23], p[25], p[27]),
+        "right_knee_angle": _angle(p[24], p[26], p[28]),
+        "left_hip_angle": _angle(p[11], p[23], p[25]),
+        "right_hip_angle": _angle(p[12], p[24], p[26]),
+        "left_shoulder_angle": _angle(p[13], p[11], p[23]),
+        "right_shoulder_angle": _angle(p[14], p[12], p[24]),
+        "trunk_angle": _angle(p[25], p[23], p[11]),
+        "neck_angle": _angle(p[11], p[0], p[12]),
+    }
+    for k, v in angles.items():
+        row["angles__{}".format(k)] = float(v)
+
+    def d3(i, j):
+        return float(np.linalg.norm(p[i] - p[j]))
+
+    dist3d = {
+        "wrist_dist": d3(15, 16),
+        "ankle_dist": d3(27, 28),
+        "shoulder_dist": d3(11, 12),
+        "hip_dist": d3(23, 24),
+        "l_wrist_hip": d3(15, 23),
+        "r_wrist_hip": d3(16, 24),
+        "l_hand_head": d3(15, 0),
+        "r_hand_head": d3(16, 0),
+        "l_wrist_shoulder": d3(15, 11),
+        "r_wrist_shoulder": d3(16, 12),
+    }
+    for k, v in dist3d.items():
+        row["dist3d__{}".format(k)] = float(v)
+
+    for name, i, j in (("wrist", 15, 16), ("ankle", 27, 28), ("hip", 23, 24)):
+        diff = np.abs(p[i] - p[j])
+        row["distxyz__{}_x".format(name)] = float(diff[0])
+        row["distxyz__{}_y".format(name)] = float(diff[1])
+        row["distxyz__{}_z".format(name)] = float(diff[2])
+
+    return row
+
+
+class StageRepCounter:
+    """Rep counter using canonical stage transitions: down -> up."""
+
+    def __init__(self):
+        self.reps_by_exercise = collections.defaultdict(int)
+        self._last_stage_by_exercise = {}
+        self._seen_down_by_exercise = collections.defaultdict(bool)
+
+    def reset(self):
+        self.reps_by_exercise.clear()
+        self._last_stage_by_exercise.clear()
+        self._seen_down_by_exercise.clear()
+
+    def update(self, exercise, stage):
+        if not exercise or exercise == "unknown" or stage not in ("up", "down"):
+            return
+        prev = self._last_stage_by_exercise.get(exercise)
+        if prev == stage:
+            return
+        self._last_stage_by_exercise[exercise] = stage
+        if stage == "down":
+            self._seen_down_by_exercise[exercise] = True
+        elif stage == "up" and self._seen_down_by_exercise[exercise]:
+            self.reps_by_exercise[exercise] += 1
+            self._seen_down_by_exercise[exercise] = False
+
+    def reps_for(self, exercise):
+        return int(self.reps_by_exercise.get(exercise or "", 0))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HUD overlay
 # ─────────────────────────────────────────────────────────────────────────────
@@ -231,7 +334,22 @@ def save_graph(graph_data, exercise, n_reps, path="movement_graph.png"):
 # ─────────────────────────────────────────────────────────────────────────────
 # Main loop
 # ─────────────────────────────────────────────────────────────────────────────
-def run(model, output_path, no_llm, cam_index):
+def _resolve_source(source):
+    try:
+        return int(source), True
+    except (TypeError, ValueError):
+        return str(source), False
+
+
+def _confidence_bucket(conf):
+    if conf >= 0.80:
+        return "high"
+    if conf >= 0.55:
+        return "medium"
+    return "low"
+
+
+def run(source, clf_path, model, output_path, no_llm):
     try:
         import mediapipe as mp
         from mediapipe.tasks.python.vision import (
@@ -260,6 +378,15 @@ def run(model, output_path, no_llm, cam_index):
         result_callback=on_result,
     )
 
+    clf_model = None
+    if clf_path:
+        if not os.path.exists(clf_path):
+            raise FileNotFoundError("Classifier model not found: {}".format(clf_path))
+        clf_model = load_model(clf_path)
+        print("Classifier: loaded {}".format(clf_path))
+    else:
+        print("Classifier: disabled (--clf not provided)")
+
     llm = None if no_llm else LLMClassifier(model=model)
     if llm:
         ok, msg = llm.check_connection()
@@ -268,9 +395,10 @@ def run(model, output_path, no_llm, cam_index):
             print("  -> Continuing without LLM")
             llm = None
 
-    cap = cv2.VideoCapture(cam_index)
+    src_value, is_cam = _resolve_source(source)
+    cap = cv2.VideoCapture(src_value)
     if not cap.isOpened():
-        raise RuntimeError("Cannot open camera {}".format(cam_index))
+        raise RuntimeError("Cannot open source {}".format(source))
     fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -280,12 +408,17 @@ def run(model, output_path, no_llm, cam_index):
         writer  = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"),
                                   fps_out, (fw, fh+160))
 
-    analyzer   = MotionAnalyzer()
-    result_obj = ClassificationResult()
-    exercise   = "waiting..."
-    frame_idx  = 0
-    t0         = time.time()
-    triggered  = False   # flag to show "movement change!" in HUD
+    analyzer     = MotionAnalyzer()
+    stage_counter = StageRepCounter()
+    result_obj   = ClassificationResult(exercise="waiting...")
+    exercise     = "unknown"
+    stage        = "unknown"
+    frame_idx    = 0
+    t0           = time.time()
+    triggered    = False
+    ex_hist      = collections.deque(maxlen=12)
+    st_hist      = collections.deque(maxlen=8)
+    conf_hist    = collections.deque(maxlen=20)
 
     cv2.namedWindow("RepCounter", cv2.WINDOW_NORMAL)
     print("\n>  Running  --  Q quit | R reset | C classify now | S save graph\n")
@@ -294,8 +427,10 @@ def run(model, output_path, no_llm, cam_index):
         while True:
             ret, frame = cap.read()
             if not ret:
-                time.sleep(0.01)
-                continue
+                if is_cam:
+                    time.sleep(0.01)
+                    continue
+                break
 
             frame_idx += 1
             fps        = frame_idx / max(time.time() - t0, 0.01)
@@ -310,16 +445,57 @@ def run(model, output_path, no_llm, cam_index):
             draw_skeleton(frame, lm)
             analyzer.update(lm)
 
-            # Update exercise from LLM result + use its recommended signal
-            if llm and llm.result.is_valid:
-                result_obj = llm.result
-                exercise   = result_obj.exercise
-                # Override EXERCISE_SIGNAL with what the LLM recommended
-                if result_obj.rep_signal:
-                    from motion_analyzer import EXERCISE_SIGNAL
-                    EXERCISE_SIGNAL[exercise.lower()] = result_obj.rep_signal
+            # Primary classifier path: per-frame stage prediction, then smooth.
+            if clf_model and lm is not None:
+                row = _extract_classifier_features(lm)
+                if row is not None:
+                    try:
+                        pred_label, pred_conf, _ = predict_pose(clf_model, row)
+                        pred_label = normalize_label(pred_label)
+                        pred_ex, pred_stage = split_label(pred_label)
+                        if pred_ex != "unknown":
+                            ex_hist.append(pred_ex)
+                        if pred_stage in ("up", "down", "rest"):
+                            st_hist.append(pred_stage)
+                        conf_hist.append(float(pred_conf))
+                    except Exception as e:
+                        # Keep the stream alive if one frame fails inference.
+                        print("  [classifier warning]", e)
 
-            n_reps, sig_name, _ = analyzer.rep_count(exercise)
+            if ex_hist:
+                exercise = max(set(ex_hist), key=ex_hist.count)
+            if st_hist:
+                stage = max(set(st_hist), key=st_hist.count)
+            if exercise != "unknown":
+                stage_counter.update(exercise, stage)
+
+            signal_reps, sig_name, _ = analyzer.rep_count(exercise)
+            stage_reps = stage_counter.reps_for(exercise)
+            n_reps = stage_reps if stage in ("up", "down") else signal_reps
+
+            if clf_model and exercise != "unknown":
+                avg_conf = float(np.mean(conf_hist)) if conf_hist else 0.0
+                disp_label = "{}_{}".format(exercise, stage) if stage in ("up", "down", "rest") else exercise
+                result_obj.exercise = disp_label
+                result_obj.confidence = _confidence_bucket(avg_conf)
+                result_obj.error = ""
+
+            # Optional LLM enriches tips/reasoning and can classify when no .pkl exists.
+            if llm and llm.result.is_valid:
+                llm_result = llm.result
+                if not clf_model:
+                    result_obj.exercise = llm_result.exercise
+                    result_obj.confidence = llm_result.confidence
+                    llm_ex, llm_stage = split_label(normalize_label(llm_result.exercise))
+                    if llm_ex != "unknown":
+                        exercise = llm_ex
+                        if llm_stage != "unknown":
+                            stage = llm_stage
+                            stage_counter.update(exercise, stage)
+                            n_reps = stage_counter.reps_for(exercise)
+                result_obj.reasoning = llm_result.reasoning
+                result_obj.form_tips = llm_result.form_tips
+
             graph_data           = analyzer.get_graph_data(exercise)
             activity             = analyzer.activity_summary()
 
@@ -350,9 +526,11 @@ def run(model, output_path, no_llm, cam_index):
             if key == ord("q"):
                 break
             elif key == ord("r"):
-                analyzer   = MotionAnalyzer()
-                result_obj = ClassificationResult()
-                exercise   = "waiting..."
+                analyzer      = MotionAnalyzer()
+                stage_counter = StageRepCounter()
+                result_obj    = ClassificationResult(exercise="waiting...")
+                exercise, stage = "unknown", "unknown"
+                ex_hist.clear(); st_hist.clear(); conf_hist.clear()
                 print("  [reset]")
             elif key == ord("c"):
                 if llm and not llm.busy:
@@ -381,10 +559,11 @@ def run(model, output_path, no_llm, cam_index):
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
+    p.add_argument("--source",  default="0", help="Webcam index or video path")
+    p.add_argument("--clf",     default=None, help="Classifier .pkl path")
     p.add_argument("--model",   default="qwen3")
     p.add_argument("--output",  default=None)
     p.add_argument("--no_llm",  action="store_true")
-    p.add_argument("--cam",     type=int, default=0)
     args = p.parse_args()
-    run(model=args.model, output_path=args.output,
-        no_llm=args.no_llm, cam_index=args.cam)
+    run(source=args.source, clf_path=args.clf, model=args.model,
+        output_path=args.output, no_llm=args.no_llm)
