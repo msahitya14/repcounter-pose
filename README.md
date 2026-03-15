@@ -1,7 +1,7 @@
 # 🏋️ Exercise Rep Counter — MediaPipe + Classifier
 
 Real-time **rep counting · exercise classification · form feedback · movement graph**  
-for 5 exercises: Squats · Push-ups · Pull-ups · Sit-ups · Jumping Jacks
+for 4 exercises: Squats · Push-ups · Pull-ups · Jumping Jacks
 
 ---
 
@@ -39,7 +39,7 @@ pose_id,pose
 ```
 Canonical classes follow `<exercise>_<stage>`:
 `jumpingjack_up/down/rest`, `pushup_up/down/rest`, `pullup_up/down/rest`,
-`situp_up/down/rest`, `squat_up/down/rest`
+`squat_up/down/rest`
 
 ### `landmarks.csv`
 33 MediaPipe landmarks × x, y, z  
@@ -73,7 +73,6 @@ Per-axis distances:
 | squat         | left knee Y   | down→up transitions |
 | pushup        | left elbow Y  | down→up transitions |
 | pullup        | left wrist Y  | down→up transitions |
-| situp         | nose Y        | down→up transitions |
 | jumpingjack   | left wrist Y  | down→up transitions |
 
 Per-frame stage prediction is smoothed and reps are counted via stage transitions (`up → down → up`).
@@ -89,7 +88,6 @@ Real-time joint angle checks displayed as colour-coded overlays:
 | squat         | depth, torso lean, knee tracking |
 | pushup        | arm extension, back sag, range |
 | pullup        | chin height, bottom extension |
-| situp         | crunch depth, neck position |
 | jumpingjack   | arm height, leg spread |
 
 ---

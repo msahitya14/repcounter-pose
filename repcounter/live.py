@@ -18,7 +18,7 @@ from repcounter.tracking import SetStatus, SetTracker, SignalRepCounter, StageRe
 from repcounter.ui import draw_overlay, draw_pose
 from stage_labels import normalize_label, split_label
 
-SIGNAL_FALLBACK_EXERCISES = {"squat", "pullup", "jumpingjack"}
+SIGNAL_FALLBACK_EXERCISES = {"pullup", "jumpingjack"}
 
 
 @dataclass
@@ -284,6 +284,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage_min_votes", type=int, default=3)
     parser.add_argument("--rep_cooldown_frames", type=int, default=6)
     parser.add_argument("--rep_feedback_seconds", type=float, default=0.5)
-    parser.add_argument("--lock_exercise", default="", choices=["", "squat", "pushup", "pullup", "situp", "jumpingjack"])
+    parser.add_argument("--lock_exercise", default="", choices=["", "squat", "pushup", "pullup", "jumpingjack"])
     parser.add_argument("--show_debug", action="store_true")
     return parser

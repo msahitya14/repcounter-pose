@@ -44,15 +44,6 @@ EXERCISE_CONFIGS = {
         signal_mode="elbow_angle",
         invert_signal=True,
     ),
-    "situp": ExerciseConfig(
-        name="situp",
-        display_name="Situps",
-        stage_up="situp_up",
-        stage_down="situp_down",
-        stage_rest="situp_rest",
-        signal_mode="torso_angle",
-        invert_signal=False,
-    ),
     "jumpingjack": ExerciseConfig(
         name="jumpingjack",
         display_name="Jumping Jacks",
