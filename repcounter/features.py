@@ -21,8 +21,6 @@ MEDIAPIPE_LANDMARK_NAMES = [
     "left_foot_index", "right_foot_index",
 ]
 
-LM_INDEX = {name: idx for idx, name in enumerate(MEDIAPIPE_LANDMARK_NAMES)}
-
 
 def angle3(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
     ba = a - b
@@ -45,9 +43,7 @@ def normalize_landmarks(landmarks_xyz: np.ndarray) -> np.ndarray:
     shoulder_width = np.linalg.norm(lm[11] - lm[12])
     torso_length = np.linalg.norm(shoulder_center - hip_center)
     scale = max(shoulder_width, torso_length, 1e-6)
-
-    lm = (lm - hip_center) / scale
-    return lm
+    return (lm - hip_center) / scale
 
 
 def compute_joint_angles(landmarks_xyz: np.ndarray) -> dict[str, float]:
@@ -86,6 +82,7 @@ def compute_distance_features(landmarks_xyz: np.ndarray) -> dict[str, float]:
 
 
 def compute_landmark_features(landmarks_xyz: np.ndarray, visibility: Optional[np.ndarray] = None) -> dict[str, float]:
+    del visibility
     features: dict[str, float] = {}
     for idx, name in enumerate(MEDIAPIPE_LANDMARK_NAMES):
         features[f"landmarks__x_{name}"] = float(landmarks_xyz[idx, 0])

@@ -17,7 +17,14 @@ def main() -> None:
             target_sets=args.target_sets,
             min_exercise_confidence=args.min_exercise_confidence,
             min_stage_confidence=args.min_stage_confidence,
+            exercise_window=args.exercise_window,
+            exercise_min_votes=args.exercise_min_votes,
+            stage_window=args.stage_window,
+            stage_min_votes=args.stage_min_votes,
             rep_cooldown_frames=args.rep_cooldown_frames,
+            rep_feedback_seconds=args.rep_feedback_seconds,
+            lock_exercise=args.lock_exercise,
+            show_debug=args.show_debug,
         )
     )
     tracker.run()

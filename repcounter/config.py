@@ -66,12 +66,9 @@ EXERCISE_CONFIGS = {
 
 EXERCISE_LABELS = list(EXERCISE_CONFIGS.keys())
 STAGE_LABELS = [
-    cfg.stage_up
-    for cfg in EXERCISE_CONFIGS.values()
+    cfg.stage_up for cfg in EXERCISE_CONFIGS.values()
 ] + [
-    cfg.stage_down
-    for cfg in EXERCISE_CONFIGS.values()
+    cfg.stage_down for cfg in EXERCISE_CONFIGS.values()
 ] + [
-    cfg.stage_rest
-    for cfg in EXERCISE_CONFIGS.values()
+    cfg.stage_rest for cfg in EXERCISE_CONFIGS.values()
 ]

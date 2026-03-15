@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import collections
 from dataclasses import dataclass
-from typing import Optional
-
 import numpy as np
 
 
 class VoteSmoother:
     def __init__(self, allowed_labels: set[str], window: int, min_votes: int):
         self.allowed_labels = allowed_labels
-        self.window = window
-        self.min_votes = min_votes
         self.buf = collections.deque(maxlen=window)
+        self.min_votes = min_votes
 
     def reset(self) -> None:
         self.buf.clear()
@@ -75,49 +72,73 @@ class SignalRepCounter:
         return self.reps
 
 
-class StageRepCounter:
-    def __init__(self, cooldown_frames: int = 10):
-        self.cooldown_frames = cooldown_frames
-        self.reps = 0
-        self.frame_idx = 0
-        self.last_rep_frame = -10**9
-        self.phase = "idle"
-        self.current_exercise = "unknown"
+class ConsecutiveExerciseSmoother:
+    def __init__(self, required_streak: int = 10):
+        self.required_streak = required_streak
+        self.active_label = "unknown"
+        self.candidate_label = "unknown"
+        self.candidate_count = 0
 
     def reset(self) -> None:
-        self.reps = 0
+        self.active_label = "unknown"
+        self.candidate_label = "unknown"
+        self.candidate_count = 0
+
+    def update(self, label: str) -> str:
+        if label == self.active_label:
+            self.candidate_label = label
+            self.candidate_count = 0
+            return self.active_label
+
+        if label == "unknown":
+            return self.active_label
+
+        if label == self.candidate_label:
+            self.candidate_count += 1
+        else:
+            self.candidate_label = label
+            self.candidate_count = 1
+
+        if self.candidate_count >= self.required_streak:
+            self.active_label = label
+            self.candidate_count = 0
+        return self.active_label
+
+
+class StageRepCounter:
+    def __init__(self, cooldown_frames: int = 6):
+        self.total_reps = 0
+        self.phase = "idle"
+        self.cooldown_frames = cooldown_frames
         self.frame_idx = 0
         self.last_rep_frame = -10**9
+
+    def reset(self) -> None:
+        self.total_reps = 0
         self.phase = "idle"
-        self.current_exercise = "unknown"
+        self.frame_idx = 0
+        self.last_rep_frame = -10**9
 
-    def update(self, stage: str) -> int:
+    def update(self, stage: str) -> bool:
         self.frame_idx += 1
-        if stage == "unknown":
-            return self.reps
-
-        if "_" not in stage:
-            return self.reps
-
-        exercise, position = stage.rsplit("_", 1)
-        if exercise != self.current_exercise:
-            self.current_exercise = exercise
-            self.phase = "idle"
-
-        if position == "up":
+        if "_" in stage:
+            _, stage = stage.rsplit("_", 1)
+        if stage == "up":
             if self.phase == "seen_down":
                 if (self.frame_idx - self.last_rep_frame) >= self.cooldown_frames:
-                    self.reps += 1
+                    self.total_reps += 1
                     self.last_rep_frame = self.frame_idx
                 self.phase = "seen_up"
-            else:
-                self.phase = "seen_up"
-        elif position == "down":
+                return True
+            self.phase = "seen_up"
+            return False
+        if stage == "down":
             if self.phase == "seen_up":
                 self.phase = "seen_down"
-        elif position == "rest":
+            return False
+        if stage == "rest":
             self.phase = "idle"
-        return self.reps
+        return False
 
 
 @dataclass
@@ -130,42 +151,32 @@ class SetStatus:
 
 
 class SetTracker:
-    def __init__(self, reps_per_set: int = 10, target_sets: int = 3, inactivity_seconds: float = 4.0):
+    def __init__(self, reps_per_set: int = 10, target_sets: int = 4):
         self.reps_per_set = reps_per_set
         self.target_sets = target_sets
-        self.inactivity_seconds = inactivity_seconds
         self.status = SetStatus()
-        self.last_rep_ts: Optional[float] = None
 
     def reset(self) -> None:
         self.status = SetStatus()
-        self.last_rep_ts = None
 
-    def update(self, total_reps: int, now_ts: float) -> SetStatus:
-        if total_reps > self.status.total_reps and not self.status.workout_done:
-            delta = total_reps - self.status.total_reps
-            self.status.total_reps = total_reps
-            self.last_rep_ts = now_ts
-            for _ in range(delta):
-                self.status.reps_in_set += 1
-                if self.status.reps_in_set >= self.reps_per_set:
-                    self.status.completed_sets += 1
+    def update(self, total_reps: int) -> SetStatus:
+        if total_reps <= self.status.total_reps or self.status.workout_done:
+            return self.status
+
+        delta = total_reps - self.status.total_reps
+        self.status.total_reps = total_reps
+        for _ in range(delta):
+            self.status.reps_in_set += 1
+            if self.status.reps_in_set >= self.reps_per_set:
+                self.status.completed_sets += 1
+                if self.status.completed_sets >= self.target_sets:
+                    self.status.workout_done = True
+                    self.status.current_set = self.target_sets
+                    self.status.reps_in_set = self.reps_per_set
+                else:
+                    self.status.current_set = self.status.completed_sets + 1
                     self.status.reps_in_set = 0
-                    if self.status.completed_sets >= self.target_sets:
-                        self.status.workout_done = True
-                    else:
-                        self.status.current_set = self.status.completed_sets + 1
-        elif (
-            self.last_rep_ts is not None
-            and not self.status.workout_done
-            and self.status.reps_in_set > 0
-            and (now_ts - self.last_rep_ts) >= self.inactivity_seconds
-        ):
-            self.status.completed_sets += 1
-            if self.status.completed_sets >= self.target_sets:
-                self.status.workout_done = True
-            else:
-                self.status.current_set = self.status.completed_sets + 1
-                self.status.reps_in_set = 0
-            self.last_rep_ts = now_ts
+        if self.status.workout_done:
+            self.status.current_set = self.target_sets
+            self.status.reps_in_set = self.reps_per_set
         return self.status
