@@ -18,6 +18,8 @@ from repcounter.tracking import SetStatus, SetTracker, SignalRepCounter, StageRe
 from repcounter.ui import draw_overlay, draw_pose
 from stage_labels import normalize_label, split_label
 
+SIGNAL_FALLBACK_EXERCISES = {"squat", "pullup", "jumpingjack"}
+
 
 @dataclass
 class LiveConfig:
@@ -177,7 +179,10 @@ class LiveExerciseTracker:
             if signal_value is not None:
                 signal_reps = state.signal_counter.update(signal_value, EXERCISE_CONFIGS[self.active_exercise].invert_signal)
 
-        total_reps = max(stage_reps, signal_reps)
+        if self.active_exercise in SIGNAL_FALLBACK_EXERCISES:
+            total_reps = max(stage_reps, signal_reps)
+        else:
+            total_reps = stage_reps
         if total_reps > stage_reps_before and not rep_completed:
             rep_completed = True
         if rep_completed:

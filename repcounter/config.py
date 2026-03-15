@@ -41,7 +41,7 @@ EXERCISE_CONFIGS = {
         stage_up="pullup_up",
         stage_down="pullup_down",
         stage_rest="pullup_rest",
-        signal_mode="wrist_y",
+        signal_mode="elbow_angle",
         invert_signal=True,
     ),
     "situp": ExerciseConfig(
@@ -59,8 +59,8 @@ EXERCISE_CONFIGS = {
         stage_up="jumpingjack_up",
         stage_down="jumpingjack_down",
         stage_rest="jumpingjack_rest",
-        signal_mode="wrist_y",
-        invert_signal=True,
+        signal_mode="arm_spread",
+        invert_signal=False,
     ),
 }
 

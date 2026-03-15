@@ -56,6 +56,8 @@ def compute_joint_angles(landmarks_xyz: np.ndarray) -> dict[str, float]:
         "left_hip_left_knee_left_ankle": angle3(lm[23], lm[25], lm[27]),
         "right_wrist_right_elbow_right_shoulder": angle3(lm[16], lm[14], lm[12]),
         "left_wrist_left_elbow_left_shoulder": angle3(lm[15], lm[13], lm[11]),
+        "arm_spread": angle3(lm[15], lm[11], lm[16]),
+        "leg_spread": angle3(lm[27], lm[23], lm[28]),
     }
 
 
@@ -151,4 +153,6 @@ def get_signal_value(exercise: str, landmarks_xyz: np.ndarray) -> Optional[float
         return float(angles["left_hip_left_knee_left_ankle"])
     if cfg.signal_mode == "torso_angle":
         return float((angles["left_elbow_left_shoulder_left_hip"] + angles["right_elbow_right_shoulder_right_hip"]) / 2.0)
+    if cfg.signal_mode == "arm_spread":
+        return float(angles["arm_spread"])
     return None
