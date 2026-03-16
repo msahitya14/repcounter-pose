@@ -3,6 +3,11 @@
 Real-time **rep counting · exercise classification · form feedback · movement graph**  
 for 4 exercises: Squats · Push-ups · Pull-ups · Jumping Jacks
 
+# LLM BRANCH
+
+To run the code with an LLM use the ```llmrepcounter.py```
+The ```rep_counter.py``` also has it, however it has the other trained classifier as the experiment too
+
 ---
 
 ## Quick Start
